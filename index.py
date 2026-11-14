@@ -280,6 +280,7 @@ def Imagen():
         print(e)
         db.close()
         return {"R":-3}
+
     
 @post('/Imagen')
 def Imagen():
@@ -314,7 +315,7 @@ def Imagen():
 
     if len(datos_comprimidos) == 0 or len(datos_comprimidos) > tamano_max_comprimido:
         return {"R": -6}
-
+   
     try:
         if datos_comprimidos[:2] == b'\x1f\x8b':
             datos_imagen = gzip.decompress(datos_comprimidos)
@@ -325,6 +326,12 @@ def Imagen():
 
     if len(datos_imagen) == 0 or len(datos_imagen) > tamano_max_real:
         return {"R": -6}
+
+    es_png = datos_imagen.startswith(b'\x89PNG\r\n\x1a\n')
+    es_jpg = datos_imagen.startswith(b'\xff\xd8\xff')
+    es_gif = datos_imagen.startswith((b'GIF87a', b'GIF89a'))
+    if not (es_png or es_jpg or es_gif):
+        return {"R": -9}
 
     dbcnf = loadDatabaseSettings('db.json')
     db = mysql.connector.connect(
