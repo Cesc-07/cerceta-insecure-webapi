@@ -7,12 +7,13 @@ FLUSH PRIVILEGES
 
 /*use webapps;*/
 
-create table if not exists Usuario(
-	id int AUTO_INCREMENT, 
-	uname varchar(50) not null,
-	email varchar(250) not null,
-	password varchar(250) not null,
-	PRIMARY KEY (id)
+CREATE TABLE Usuario (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    uname VARCHAR(50) NOT NULL,
+    email VARCHAR(100) NOT NULL,
+    password VARCHAR(255) NOT NULL,
+	/* Se agrego para uso de TOTP */
+    totp_secret VARCHAR(64) NULL
 )ENGINE=InnoDB;
 
 create table if not exists AccesoToken(

@@ -9,6 +9,7 @@ from pathlib import Path
 from bottle import route, run, template, post, request, static_file
 import secrets
 import bcrypt
+import pyotp
 
 def loadDatabaseSettings(pathjs):
     pathjs = Path(pathjs)
@@ -62,29 +63,43 @@ def Registro():
     R = False
     try:
         with db.cursor() as cursor:
-            #ANTES: MD5 sin SALT
+            #ANTES: MD5 sin SALT (Bcrypt)
             #cursor.execute(
             #   'INSERT INTO Usuario VALUES (null, %s, %s, MD5(%s))',
             # (request.json["uname"], request.json["email"], request.json["password"])
             #)
             
-            #DESPUES: (Parche) Hashing seguro con bcrypt + salt 
+            #DESPUES (Parche) Hashing seguro con bcrypt + salt (Bcrypt)
             hashed_pw = bcrypt.hashpw(
                 request.json["password"].encode('utf-8'),
                 bcrypt.gensalt()
             ).decode('utf-8')
-            cursor.execute(
-                'INSERT INTO Usuario VALUES (null, %s, %s, %s)',
-                (request.json["uname"], request.json["email"], hashed_pw)
-            )
             
+            ### TOTP 
+            totp_secret = pyotp.random_base32()
+            totp_uri = pyotp.totp.TOTP(totp_secret).provisioning_uri(
+                name=request.json["email"],
+                issuer_name="InsecureWebAPI"
+            )          
+            #cursor.execute(
+            #    'INSERT INTO Usuario VALUES (null, %s, %s, %s)',
+            #    (request.json["uname"], request.json["email"], hashed_pw)
+            #)
+            
+            #TOTP
+            cursor.execute(
+            'INSERT INTO Usuario (id, uname, email, password, totp_secret) VALUES (null, %s, %s, %s, %s)',
+            (request.json["uname"], request.json["email"], hashed_pw, totp_secret)
+            )
             R = cursor.lastrowid
             db.commit()
         db.close()
     except Exception as e:
         print(e) 
         return {"R":-2}
-    return {"R":0,"D":R}
+    #return {"R":0,"D":R}
+    #TOTP
+    return {"R":0, "D":{"id": R, "totp_secret": totp_secret, "totp_uri": totp_uri}}
 
 
 
@@ -130,13 +145,28 @@ def Login():
             #cursor.execute('SELECT id FROM Usuario WHERE uname = %s AND password = MD5(%s)',(request.json["uname"], request.json["password"]))
             
             #DESPUES: (Parche) Obtener hash de BD y validar con bcrypt
+            #cursor.execute(
+            #    'SELECT id, password FROM Usuario WHERE uname = %s',
+            #    (request.json["uname"],)
+            #)
+            
+            #TOTP Autenticacion multifactor (2FA) validando codigo TOTP de 6 digitos
             cursor.execute(
-                'SELECT id, password FROM Usuario WHERE uname = %s',
+                'SELECT id, password, totp_secret FROM Usuario WHERE uname = %s',
                 (request.json["uname"],)
             )
-            
-        
             R = cursor.fetchall()
+            if not R or not bcrypt.checkpw(request.json["password"].encode('utf-8'), R[0][1].encode('utf-8')):
+                db.close()
+                return {"R": -3}
+
+            totp_secret = R[0][2]
+            if totp_secret:
+                codigo_totp = str(request.json.get("totp", "")).strip()
+                if not codigo_totp or not pyotp.TOTP(totp_secret).verify(codigo_totp, valid_window=1):
+                    db.close()
+                    return {"R": -5}
+            
     except Exception as e: 
         print(e)
         db.close()
@@ -148,9 +178,9 @@ def Login():
     #    return {"R":-3}
     
     # --- DESPUES (PARCHE) Valida existencia de usuario y verifica hash bcrypt) 
-    if not R or not bcrypt.checkpw(request.json["password"].encode('utf-8'), R[0][1].encode('utf-8')):
-        db.close()
-        return {"R": -3}
+    #if not R or not bcrypt.checkpw(request.json["password"].encode('utf-8'), R[0][1].encode('utf-8')):
+    #    db.close()
+    #    return {"R": -3}
     
     T = getToken();
     #file_put_contents('/tmp/log','insert into AccesoToken values('.R[0].',"'.T.'",now())');
