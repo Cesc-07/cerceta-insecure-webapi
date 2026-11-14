@@ -10,6 +10,7 @@ from bottle import route, run, template, post, request, static_file
 import secrets
 import bcrypt
 import pyotp
+import gzip 
 
 def loadDatabaseSettings(pathjs):
     pathjs = Path(pathjs)
@@ -234,6 +235,7 @@ def Imagen():
     if not R:
         return {"R":-1}
     
+    id
     dbcnf = loadDatabaseSettings('db.json');
     db = mysql.connector.connect(
         host='localhost', port = dbcnf['port'],
@@ -280,6 +282,101 @@ def Imagen():
         db.close()
         return {"R":-3}
     
+@post('/Imagen')
+def Imagen():
+    tmp = Path('tmp')
+    if not tmp.exists():
+        tmp.mkdir()
+    img = Path('img')
+    if not img.exists():
+        img.mkdir()
+
+    if not request.json:
+        return {"R": -1}
+
+    R = 'name' in request.json and 'data' in request.json and 'ext' in request.json and 'token' in request.json
+    if not R:
+        return {"R": -1}
+
+    # --- PARCHE A04: Validar extension permitida (evita subir .py/.php o Path Traversal) ---
+    ext = str(request.json['ext']).lower().strip().replace('.', '')
+    extensiones_validas = ['png', 'jpg', 'jpeg', 'gif']
+    if ext not in extensiones_validas:
+        return {"R": -4}
+
+    # --- PARCHE A04: Validar Base64, descomprimir Gzip y limitar tamano (Anti Gzip Bomb) ---
+    try:
+        datos_comprimidos = base64.b64decode(request.json['data'].encode('utf-8'), validate=True)
+    except Exception:
+        return {"R": -5}
+
+    tamano_max_comprimido = 2 * 1024 * 1024  # 2 MB comprimido
+    tamano_max_real = 5 * 1024 * 1024        # 5 MB descomprimido
+
+    if len(datos_comprimidos) == 0 or len(datos_comprimidos) > tamano_max_comprimido:
+        return {"R": -6}
+
+    try:
+        if datos_comprimidos[:2] == b'\x1f\x8b':
+            datos_imagen = gzip.decompress(datos_comprimidos)
+        else:
+            datos_imagen = datos_comprimidos
+    except Exception:
+        return {"R": -8}
+
+    if len(datos_imagen) == 0 or len(datos_imagen) > tamano_max_real:
+        return {"R": -6}
+
+    dbcnf = loadDatabaseSettings('db.json')
+    db = mysql.connector.connect(
+        host='localhost', port=dbcnf['port'],
+        database=dbcnf['dbname'],
+        user=dbcnf['user'],
+        password=dbcnf['password']
+    )
+
+    # --- PARCHE A04 / A01: Verificar que el token exista en AccesoToken ---
+    TKN = request.json['token']
+    try:
+        with db.cursor() as cursor:
+            cursor.execute('SELECT id_Usuario FROM AccesoToken WHERE token = %s', (TKN,))
+            R = cursor.fetchall()
+    except Exception as e:
+        print(e)
+        db.close()
+        return {"R": -2}
+
+    if not R:
+        db.close()
+        return {"R": -7}
+
+    id_Usuario = R[0][0]
+
+    # --- PARCHE A01 / A04: Guardar archivo con nombre aleatorio impredecible ---
+    nombre_aleatorio = secrets.token_hex(16)
+    ruta_final = f"img/{nombre_aleatorio}.{ext}"
+    ruta_temporal = f"tmp/{nombre_aleatorio}"
+
+    with open(ruta_temporal, "wb") as imagen:
+        imagen.write(datos_imagen)
+
+    try:
+        with db.cursor() as cursor:
+            cursor.execute(
+                'INSERT INTO Imagen VALUES (null, %s, %s, %s)',
+                (request.json["name"], ruta_final, id_Usuario)
+            )
+            idImagen = cursor.lastrowid
+            db.commit()
+            shutil.move(ruta_temporal, ruta_final)
+        db.close()
+        return {"R": 0, "D": idImagen}
+    except Exception as e:
+        print(e)
+        if Path(ruta_temporal).exists():
+            Path(ruta_temporal).unlink()
+        db.close()
+        return {"R": -3}
 """
 /*
  * Este Registro recibe un JSON con el siguiente formato
@@ -295,54 +392,67 @@ def Imagen():
 
 @post('/Descargar')
 def Descargar():
-    dbcnf = loadDatabaseSettings('db.json');
-    db = mysql.connector.connect(
-        host='localhost', port = dbcnf['port'],
-        database = dbcnf['dbname'],
-        user = dbcnf['user'],
-        password = dbcnf['password']
-    )
-    
-    
-    ###/ obtener el cuerpo de la peticion
     if not request.json:
-        return {"R":-1}
-    ######/
-    R = 'token' in request.json and 'id' in request.json  
-    # TODO checar si estan vacio los elementos del json
-    if not R:
-        return {"R":-1}
-    
-    # TODO validar correo en json
-    # Comprobar que el usuario sea valido
-    TKN = request.json['token'];
-    idImagen = request.json['id'];
-    
-    R = False
-    try:
-        with db.cursor() as cursor:
-            cursor.execute('SELECT id_Usuario FROM AccesoToken WHERE token = %s',(TKN,));
+        return {"R": -1}
 
-            R = cursor.fetchall()
-    except Exception as e: 
-        print(e)
-        db.close()
-        return {"R":-2}
-        
-    
-    
-    # Buscar imagen y enviarla
-    
+    R = 'token' in request.json and 'id' in request.json
+    if not R:
+        return {"R": -1}
+
+    dbcnf = loadDatabaseSettings('db.json')
+    db = mysql.connector.connect(
+        host='localhost', port=dbcnf['port'],
+        database=dbcnf['dbname'],
+        user=dbcnf['user'],
+        password=dbcnf['password']
+    )
+
+    TKN = request.json['token']
+    idImagen = request.json['id']
+
+    # --- PARCHE A01: Verificar token valido y obtener dueno ---
     try:
         with db.cursor() as cursor:
-            cursor.execute('SELECT name, ruta FROM Imagen WHERE id = %s',(idImagen,));
+            cursor.execute('SELECT id_Usuario FROM AccesoToken WHERE token = %s', (TKN,))
             R = cursor.fetchall()
-    except Exception as e: 
+    except Exception as e:
         print(e)
         db.close()
-        return {"R":-3}
-    print(Path("img").resolve(),R[0][1])
-    return static_file(R[0][1],Path(".").resolve())
+        return {"R": -2}
+
+    if not R:
+        db.close()
+        return {"R": -4}
+
+    id_Usuario = R[0][0]
+
+    # --- PARCHE A01 (Anti-IDOR): Comprobar que la imagen pertenezca al usuario ---
+    try:
+        with db.cursor() as cursor:
+            cursor.execute(
+                'SELECT name, ruta FROM Imagen WHERE id = %s AND id_Usuario = %s',
+                (idImagen, id_Usuario)
+            )
+            R = cursor.fetchall()
+        db.close()
+    except Exception as e:
+        print(e)
+        db.close()
+        return {"R": -3}
+
+    if not R:
+        return {"R": -5}
+
+    # --- Retornar la URL aleatoria de la imagen ---
+    ruta_aleatoria = R[0][1]
+    url_imagen = f"{request.urlparts.scheme}://{request.urlparts.netloc}/{ruta_aleatoria}"
+    return {"R": 0, "D": {"name": R[0][0], "ruta": ruta_aleatoria, "url": url_imagen}}
+
+
+@route('/img/<filename>')
+def servir_imagen(filename):
+    return static_file(filename, root=Path('img').resolve())
+
 
 if __name__ == '__main__':
-    run(host='localhost', port=8080, debug=True)
+    run(host='localhost', port=8080, debug=False)
