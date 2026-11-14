@@ -235,7 +235,6 @@ def Imagen():
     if not R:
         return {"R":-1}
     
-    id
     dbcnf = loadDatabaseSettings('db.json');
     db = mysql.connector.connect(
         host='localhost', port = dbcnf['port'],
