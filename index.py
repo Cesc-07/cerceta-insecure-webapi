@@ -11,6 +11,8 @@ import secrets
 import bcrypt
 import pyotp
 import gzip 
+import re
+import html
 
 def loadDatabaseSettings(pathjs):
     pathjs = Path(pathjs)
@@ -30,6 +32,28 @@ function loadDatabaseSettings(pathjs):
 def getToken():
     return secrets.token_hex(16)
 
+# --- PARCHE 7: A07 / A03: Validacion de entradas, politica de contrasenas y sanitizacion XSS ---
+def validar_email(correo):
+    patron = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return bool(re.match(patron, correo))
+
+def validar_password_segura(password):
+    
+    if len(password) < 8:
+        return False
+    if not re.search(r'[A-Z]', password):
+        return False
+    if not re.search(r'[a-z]', password):
+        return False
+    if not re.search(r'\d', password):
+        return False
+    return True
+
+def limpiar_y_escapar_texto(texto, max_len=100):
+    limpio = str(texto).strip()[:max_len]
+    return html.escape(limpio, quote=True)
+    
+
 """
 */ 
 # Registro
@@ -45,13 +69,7 @@ def getToken():
 """
 @post('/Registro')
 def Registro():
-    dbcnf = loadDatabaseSettings('db.json');
-    db = mysql.connector.connect(
-        host='localhost', port = dbcnf['port'],
-        database = dbcnf['dbname'],
-        user = dbcnf['user'],
-        password = dbcnf['password']
-    )
+
     ####/ obtener el cuerpo de la peticion
     if not request.json:
         return {"R":-1}
@@ -61,6 +79,28 @@ def Registro():
         return {"R":-1}
     # TODO validar correo en json
     # TODO Control de error de la DB
+    
+    # --- DESPUES (Parche A07 / A03: Validar no vacios, email, contrasena fuerte y sanitizar XSS) ---
+    uname_raw = str(request.json.get("uname", "")).strip()
+    email_raw = str(request.json.get("email", "")).strip().lower()
+    password_raw = str(request.json.get("password", ""))
+
+    if not uname_raw or not email_raw or not password_raw.strip():
+        return {"R": -1}
+
+    if not validar_email(email_raw) or not validar_password_segura(password_raw):
+        return {"R": -6}
+
+    uname_seguro = limpiar_y_escapar_texto(uname_raw, max_len=50)
+
+    dbcnf = loadDatabaseSettings('db.json')
+    db = mysql.connector.connect(
+        host='localhost', port=dbcnf['port'],
+        database=dbcnf['dbname'],
+        user=dbcnf['user'],
+        password=dbcnf['password']
+    )
+    
     R = False
     try:
         with db.cursor() as cursor:
@@ -70,27 +110,30 @@ def Registro():
             # (request.json["uname"], request.json["email"], request.json["password"])
             #)
             
-            #DESPUES (Parche) Hashing seguro con bcrypt + salt (Bcrypt)
+            #(Parche) Hashing seguro con bcrypt + salt (Bcrypt)
             hashed_pw = bcrypt.hashpw(
-                request.json["password"].encode('utf-8'),
+                #request.json["password"].encode('utf-8'),
+                #bcrypt.gensalt()
+                password_raw.encode('utf-8'), 
                 bcrypt.gensalt()
             ).decode('utf-8')
             
             ### TOTP 
             totp_secret = pyotp.random_base32()
             totp_uri = pyotp.totp.TOTP(totp_secret).provisioning_uri(
-                name=request.json["email"],
+                #name=request.json["email"],
+                name=email_raw,
                 issuer_name="InsecureWebAPI"
             )          
             #cursor.execute(
             #    'INSERT INTO Usuario VALUES (null, %s, %s, %s)',
             #    (request.json["uname"], request.json["email"], hashed_pw)
             #)
-            
             #TOTP
             cursor.execute(
             'INSERT INTO Usuario (id, uname, email, password, totp_secret) VALUES (null, %s, %s, %s, %s)',
-            (request.json["uname"], request.json["email"], hashed_pw, totp_secret)
+            #(request.json["uname"], request.json["email"], hashed_pw, totp_secret)
+            (uname_seguro, email_raw, hashed_pw, totp_secret)
             )
             R = cursor.lastrowid
             db.commit()
@@ -120,13 +163,15 @@ def Registro():
 
 @post('/Login')
 def Login():
-    dbcnf = loadDatabaseSettings('db.json');
-    db = mysql.connector.connect(
-        host='localhost', port = dbcnf['port'],
-        database = dbcnf['dbname'],
-        user = dbcnf['user'],
-        password = dbcnf['password']
-    )
+    
+    #dbcnf = loadDatabaseSettings('db.json');
+    #db = mysql.connector.connect(
+    #    host='localhost', port = dbcnf['port'],
+    #    database = dbcnf['dbname'],
+    #    user = dbcnf['user'],
+    #   password = dbcnf['password']
+    #)
+    
     ###/ obtener el cuerpo de la peticion
     if not request.json:
         return {"R":-1}
@@ -136,6 +181,21 @@ def Login():
     if not R:
         return {"R":-1}
     
+    # --- Validar campos no vacios y sanitizar uname) 
+    uname_raw = str(request.json.get("uname", "")).strip()
+    password_raw = str(request.json.get("password", ""))
+
+    if not uname_raw or not password_raw.strip():
+        return {"R": -1}
+    
+    uname_seguro = limpiar_y_escapar_texto(uname_raw, max_len=50)
+    dbcnf = loadDatabaseSettings('db.json')
+    db = mysql.connector.connect(
+        host='localhost', port = dbcnf['port'],
+        database = dbcnf['dbname'],
+        user = dbcnf['user'],
+        password = dbcnf['password']
+    )
     # TODO validar correo en json
     # TODO Control de error de la DB
     R = False
@@ -154,10 +214,11 @@ def Login():
             #TOTP Autenticacion multifactor (2FA) validando codigo TOTP de 6 digitos
             cursor.execute(
                 'SELECT id, password, totp_secret FROM Usuario WHERE uname = %s',
-                (request.json["uname"],)
+                (uname_seguro,)
             )
             R = cursor.fetchall()
-            if not R or not bcrypt.checkpw(request.json["password"].encode('utf-8'), R[0][1].encode('utf-8')):
+            #if not R or not bcrypt.checkpw(request.json["password"].encode('utf-8'), R[0][1].encode('utf-8')):
+            if not R or not bcrypt.checkpw(password_raw.encode('utf-8'), R[0][1].encode('utf-8')):
                 db.close()
                 return {"R": -3}
 
